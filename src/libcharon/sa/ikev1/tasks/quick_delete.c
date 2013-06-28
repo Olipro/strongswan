@@ -59,6 +59,11 @@ struct private_quick_delete_t {
 	 * SA already expired?
 	 */
 	bool expired;
+
+	/**
+	 * whether to enforce delete action policy
+	 */
+	bool check_delete_action;
 };
 
 /**
@@ -69,7 +74,9 @@ static bool delete_child(private_quick_delete_t *this,
 {
 	u_int64_t bytes_in, bytes_out;
 	child_sa_t *child_sa;
+	child_cfg_t *child_cfg;
 	bool rekeyed;
+	action_t action;
 
 	child_sa = this->ike_sa->get_child_sa(this->ike_sa, protocol, spi, TRUE);
 	if (!child_sa)
@@ -112,11 +119,26 @@ static bool delete_child(private_quick_delete_t *this,
 	if (!rekeyed)
 	{
 		charon->bus->child_updown(charon->bus, child_sa, FALSE);
-	}
+		action = child_sa->get_close_action(child_sa);
+		child_cfg = child_sa->get_config(child_sa);
+		child_cfg->get_ref(child_cfg);
+		this->ike_sa->destroy_child_sa(this->ike_sa, protocol, spi);
 
-	this->ike_sa->destroy_child_sa(this->ike_sa, protocol, spi);
+		if(this->check_delete_action)
+			switch(action)
+			{
+				case ACTION_RESTART:
+					child_cfg->get_ref(child_cfg);
+					this->ike_sa->initiate(this->ike_sa, child_cfg, 0,
+						NULL, NULL);
+					break;
 
-	/* TODO-IKEv1: handle close action? */
+				default:
+					break;
+			}
+		child_cfg->destroy(child_cfg);
+	} else
+		this->ike_sa->destroy_child_sa(this->ike_sa, protocol, spi);
 
 	return TRUE;
 }
@@ -172,11 +194,14 @@ METHOD(task_t, process_r, status_t,
 			{
 				DBG1(DBG_IKE, "received DELETE for %N CHILD_SA with SPI %.8x",
 					 protocol_id_names, protocol, ntohl(spi));
+				this->check_delete_action = TRUE;
 				if (!delete_child(this, protocol, spi))
 				{
 					DBG1(DBG_IKE, "CHILD_SA not found, ignored");
+					this->check_delete_action = FALSE;
 					continue;
 				}
+				this->check_delete_action = FALSE;
 			}
 			spis->destroy(spis);
 		}
